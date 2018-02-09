@@ -1,0 +1,339 @@
+#!/bin/bash
+
+librariesFound="false"
+EndNoteVersions=("X8" "X7" "X6")
+
+
+#startup folders
+startup2016="/Library/Application Support/Microsoft/Office365/User Content.localized/Startup.localized/Word"
+
+startup2011="/Applications/Microsoft Office 2011/Office/Startup/Word"
+
+
+#find available EndNoteVersions of EndNote
+getEndNoteVersions(){
+	newVersions=()
+	for ver in "${EndNoteVersions[@]}"; do
+		if [ -d "/Applications/EndNote ${ver}" ]; then
+			newVersions+=("$ver")
+		fi
+	done
+	EndNoteVersions=("${newVersions[@]}")
+}
+
+getWordProcessors() {
+	wordProcessors=()
+	if [ -d "$startup2011" ]; then
+		wordProcessors+=("2011")
+	fi
+	if [ -d "$startup2016" ]; then
+		wordProcessors+=("2016")
+	fi
+}
+
+# arrays to hold file paths
+
+enl=()
+enlp=()
+enlx=()
+data=() # orphaned Data folders
+orphaned=() #orphaned enl files
+
+
+# useful procedures
+
+getSize() {
+	read size _ < <(du -k "$1")
+	echo "$size"
+}
+
+getLibrarySize(){
+	lib="$1"
+	let size="$(getSize "$lib")"		
+	dataFolder="$(nameOfDataFolder "$lib")"	
+	if [ "$(getExt "$lib")" = 'enl' ] && [ -d "$dataFolder" ]
+	then
+		dataSize="$(getSize "$dataFolder")"
+		((size = $size + $dataSize))
+	fi
+	echo "$size"
+}
+
+nameOfDataFolder() {
+	path="$1"
+	echo "${path%.*}.Data"
+}
+
+nameOfEnlFile() {
+	path="$1"
+	echo "${path%.*}.enl"
+}
+
+disambiguate() {
+	path="$1"
+	rand=$RANDOM
+	echo "${rand}${path}"
+}
+
+getExt() {
+	path="$1"
+	echo "${path##*.}" 
+}
+
+getName() {
+	path="$1"
+	echo "${path##*/}"
+}
+
+getDirectory() {
+	path="$1"
+	echo "${path%/*}"
+}
+
+contains() {
+	haystack="$1"
+	needle="$2"
+	[ ! "${haystack#*$needle}" = "$haystack" ] && echo 'true'
+}
+
+listLibraries() {
+	file="${HOME}/Desktop/LibrariesFound-${RANDOM}"
+	touch "$file"
+	{ 
+	printf ".enl files\n"
+	for lib in "${enl[@]}"; do
+		printf "\t$lib\n"
+	done 
+
+	printf "orphaned .enl files\n"
+	for lib in "${orphaned[@]}"; do
+		printf "\t$lib\n"
+	done 
+
+
+	printf "orphaned .Data folders\n"
+	for lib in "${data[@]}"; do
+		printf "\t$lib\n"
+	done 
+
+	printf ".enlp files\n"
+	for lib in "${enlp[@]}"; do
+		printf "\t$lib\n"
+	done 
+	printf ".enlx files\n"
+	for lib in "${enlx[@]}"; do
+		printf "\t$lib\n"
+	done 
+	}  >> "$file" 
+	open -t "$file"        	
+	echo "Text file $file created"
+	read -p "press any key to continue"
+}
+
+copyLibraries() {
+	dest="${HOME}/Desktop/EndNote libraries-${RANDOM}"
+	mkdir "$dest"
+	arr=("$@")
+	for lib in "${arr[@]}"; do
+		echo "Copying $lib"
+		dataFolder="none"
+		ext="$(getExt "$lib")"
+
+		#disambiguate if necessary
+		newLibName="$(getName "$lib")"
+		if [ -f "$lib" ]
+			then
+			if [ -e "${dest}/${newLibName}" ]; then
+				newLibName="$(disambiguate "$newLibName")"
+			fi
+			else
+			if [ -d "${dest}/${newLibName}" ]; then
+				newLibName="$(disambiguate "$newLibName")"
+			fi
+		fi
+			
+    		#if Data folder, let's copy it and recreate the enl file
+	   	if [ "$ext" = "Data" ]; then
+			enlFile="$(nameOfEnlFile "$newLibName")"
+			enlName="$(getName "$enlFile")"
+			touch "${dest}/${enlName}"
+			cp -r "$lib" "${dest}/${newLibName}" 2> /dev/null 
+		fi
+
+		#see if there is a corresponding .Data folder to deal with
+		if [ "$ext" = "enl" ]; then 
+			dataFolder="$(nameOfDataFolder "$lib")"
+			if [ ! -d "$dataFolder" ]; then
+				dataFolder="none"
+			fi
+		fi
+
+		if [ "$ext" = "enlp" ]
+			then cp -r "$lib" "${dest}/${newLibName}" 2> /dev/null 
+			else cp "$lib" "${dest}/${newLibName}" 2> /dev/null
+		fi
+		if [ ! "$dataFolder" = "none" ]; then
+			cp -r "$dataFolder" "${dest}/${newLibName%.*}.Data" 2> /dev/null 
+		fi
+	done
+	printf "\n\n$# libraries copied to ${dest}\n" 
+}
+
+getLibraries() {
+	librariesFound="true"
+	printf "Locating library files.\nThis may take a few minutes...\n\n"
+	let count=0
+	for item in '*.enl*' '*rdb' ; do
+		while read -r -d ""; do
+			printf "found so far: %s\r" "$count"
+			
+			#exlude shared libraries
+			res=$(contains "$REPLY" "Application Support")
+			if [ ! "$res" = 'true' ]; then
+				case "$REPLY" in
+					*rdb) 	dataFolder="$(getDirectory "$REPLY")" 				
+						if [ ! -e "$(nameOfEnlFile "$dataFolder")" ]; then
+							data+=("$(getDirectory "$REPLY")") 				
+							((count++)) 
+						fi ;;
+					*.enlp) enlp+=("$REPLY") 
+						((count++)) ;;
+					*.enlx) enlx+=("$REPLY") 
+						((count++)) ;;
+					*.enl)  path="$(getDirectory "$REPLY")" # exclude enlp contents
+
+						#we don't want enl files inside the enlp folder
+						if [ "$(getExt "$path")" = "enlp" ] 
+						then
+							continue
+						else
+							if [ -d "$(nameOfDataFolder "$REPLY")" ]
+								then enl+=("$REPLY") 
+								else orphaned+=("$REPLY") 
+							fi 
+							((count++))
+						fi ;;
+				esac
+			fi
+		done < <(eval mdfind "kMDItemDisplayName==""$item" -0)
+	done
+}
+
+printLibraries() {
+	printf "=========================\n"
+	printf "Search results\n"
+	printf "enl: %s\n" "${#enl[@]}"
+	printf "%s orphaned enl files\n"  "${#orphaned[@]}"
+	printf "%s orphaned Data folders\n" "${#data[@]}"
+	printf "enlp: %s\n" "${#enlp[@]}"
+	printf "enlx: %s\n" "${#enlx[@]}"
+	printf "=========================\n"
+}
+
+displayLibrariesMenu(){
+	printf "\nOrganize Libraries\n"
+	printf "Please select an option\n\n"
+	mainOptions=("Copy all libraries to a common folder" "List all Libraries" "Return to Main Menu" "Quit")
+	select opt in "${mainOptions[@]}"; do
+		case "$opt" in
+			"Copy all libraries to a common folder") 
+				copyLibraries "${enl[@]}" "${data[@]}" "${orphaned[@]}" \
+						  "${enlx[@]}" "${enlp[@]}"
+				read -p "Press any key to return to the main menu"
+				break ;;
+			 "List all Libraries") 	listLibraries ;;
+			 "Return to Main Menu") return ;;	
+			 "Quit")	exit 0 ;;
+			*) 		echo invalid option ;;
+		esac
+	done
+
+}
+displayToolsMenu () {
+	#elevate to root if necessary
+	if [ ! "$(id -u)" = 0 ]; then
+		echo "Actions in this menu require root permissions"
+		read -p "Press any key to continue"
+		sudo "$0" "-t"
+		exit 0  # exit as other instance of script is finished
+	fi
+
+	clear
+	getEndNoteVersions
+	getWordProcessors
+	printf "\nCWYW Utilities Menu\n"
+	printf "Please select a version of EndNote\n\n"
+        versionOptions=()
+	for version in "${EndNoteVersions[@]}"; do
+		versionOptions+=("EndNote $version")
+	done
+	versionOptions+=("Return to Main Menu")
+	
+
+	select opt in "${versionOptions[@]}"; do
+		case "$opt" in
+			"Return to Main Menu") 	return ;;
+			*X6) 			EndNoteVersionSelected="X6"; break  ;;
+			*X7) 			EndNoteVersionSelected="X7"; break  ;;
+			*X8) 			EndNoteVersionSelected="X8"; break  ;;
+		esac
+	done
+
+	wordProcessorOptions=()
+	for version in "${wordProcessors[@]}"; do
+		wordProcessorOptions+=("$version")
+	done
+	wordProcessorOptions+=("Return to Main Menu")
+	
+	select opt in "${wordProcessorOptions[@]}"; do
+		case "$opt" in
+			"Return to Main Menu") 	return ;;
+			2011) 			startup="$startup2011"; wordProcessorSelected="2011"; break  ;;
+			2016) 			startup="$startup2016"; wordProcessorSelected="2016"; break  ;;
+		esac
+	done
+	while pgrep -x "Microsoft Word" > /dev/null
+	do
+		 echo 'Please quit Microsoft Word'
+		 read -p 'Press any key to continue'
+	done
+	rm -r "${startup}/EndNote CWYW Word ${wordProcessorSelected}.bundle" 
+	cp -r "/Applications/EndNote ${EndNoteVersionSelected}/Cite While You Write/EndNote CWYW Word ${wordProcessorSelected}.bundle" "$startup"
+}
+
+displayMainMenu() {
+	#pos parameter will be -t when just elevated to root in tools menu
+	if [ "$1" = "-t" ]; then
+		displayToolsMenu
+	fi
+
+	while [ ! "$done" = "true" ]; do
+		clear
+		printf "\nWelcome to Endnote's little helper\n\n"
+		printf "Main Menu\n"
+		printf "Please select an option\n\n"
+		mainOptions=("Find Libraries" "Load CWYW tools" "Quit")
+		select opt in "${mainOptions[@]}"; do
+			case "$opt" in
+				"Find Libraries")   	if [ "$librariesFound" = "false" ]; then
+								getLibraries 
+							fi
+							printLibraries
+							displayLibrariesMenu 					  
+							break ;;
+				"Load CWYW tools")
+						displayToolsMenu 
+						break ;;
+				"Quit")		done="true"
+						break ;;
+				*) 		echo invalid option ;;
+			esac
+		done
+	done
+}
+
+# main
+if [ "$1" = "-t" ]
+	then displayMainMenu -t
+	else displayMainMenu 
+fi
